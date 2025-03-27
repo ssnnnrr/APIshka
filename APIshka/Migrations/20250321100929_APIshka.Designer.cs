@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace APIshka.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    [Migration("20250314105642_APIshka")]
+    [Migration("20250321100929_APIshka")]
     partial class APIshka
     {
         /// <inheritdoc />
@@ -97,6 +97,13 @@ namespace APIshka.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("TokenExpiry")
+                        .HasColumnType("datetime2");
 
                     b.HasKey("Id");
 

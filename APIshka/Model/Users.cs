@@ -15,8 +15,10 @@ namespace APIshka.Model
         public string Login { get; set; }
 
         [Required]
-        [MaxLength(64)] // Длина хэша пароля (например, SHA-256)
+        [MaxLength(64)]
         public string PasswordHash { get; set; }
+        public string Token { get; set; }
+        public DateTime? TokenExpiry { get; set; }
 
         public int Coins { get; set; } = 0;
         public ICollection<Skin> Skins { get; set; } = new List<Skin>();

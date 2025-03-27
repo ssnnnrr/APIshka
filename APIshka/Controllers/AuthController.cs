@@ -11,47 +11,12 @@ using APIshka.Request;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cors;
+using Microsoft.Extensions.Configuration;
 
 namespace APIshka.Controllers
 {
     [ApiController]
-    [Route("api/[controller]")]
-    public class RegisterController : ControllerBase
-    {
-        private readonly ApplicationDbContext _context;
-
-        public RegisterController(ApplicationDbContext context)
-        {
-            _context = context;
-        }
-
-        [HttpPost("register")]
-        public IActionResult Register([FromBody] RegisterRequest request)
-        {
-            if (_context.Users.Any(u => u.Login == request.Login))
-                return Conflict("User already exists");
-
-            var user = new User
-            {
-                Login = request.Login,
-                PasswordHash = HashPassword(request.Password),
-                Coins = 0
-            };
-
-            _context.Users.Add(user);
-            _context.SaveChanges();
-            return Ok(user);
-        }
-
-        private string HashPassword(string password)
-        {
-            using var sha256 = SHA256.Create();
-            var hashedBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
-            return Convert.ToBase64String(hashedBytes);
-        }
-    }
-    [ApiController]
-    [Route("api/[controller]")]
+    [Route("api/auth")]
     public class AuthController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
@@ -66,143 +31,95 @@ namespace APIshka.Controllers
         [HttpPost("login")]
         public IActionResult Login([FromBody] LoginRequest request)
         {
-            var user = _context.Users.FirstOrDefault(u => u.Login == request.Username && u.PasswordHash == HashPassword(request.Password));
-            if (user == null)
-                return Unauthorized();
+            var user = _context.Users.FirstOrDefault(u => u.Login == request.Username);
+            if (user == null || user.PasswordHash != request.Password)
+                return Unauthorized("Invalid credentials");
 
-            var token = GenerateJwtToken(user);
-            return Ok(new { Token = token });
+            var token = GenerateJwtToken(user.Id);
+            user.Token = token;
+            user.TokenExpiry = DateTime.UtcNow.AddDays(7);
+            _context.SaveChanges();
+
+            return Ok(new { token, user.Coins });
         }
 
-        private string GenerateJwtToken(User user)
+        [HttpPost("register")]
+        public async Task<IActionResult> Register([FromBody] RegisterRequest request)
+        {
+            if (_context.Users.Any(u => u.Login == request.Login))
+                return BadRequest("Username already exists");
+
+            var user = new User
+            {
+                Login = request.Login,
+                PasswordHash = request.Password,
+                Coins = 100
+            };
+
+            _context.Users.Add(user);
+            await _context.SaveChangesAsync();
+
+            var token = GenerateJwtToken(user.Id);
+            user.Token = token;
+            user.TokenExpiry = DateTime.UtcNow.AddDays(7);
+            await _context.SaveChangesAsync();
+
+            return Ok(new { token, user.Coins });
+        }
+
+        private string GenerateJwtToken(int userId)
         {
             var tokenHandler = new JwtSecurityTokenHandler();
             var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Key"]);
+
             var tokenDescriptor = new SecurityTokenDescriptor
             {
-                Subject = new ClaimsIdentity(new[] { new Claim("id", user.Id.ToString()) }),
+                Subject = new ClaimsIdentity(new[] { new Claim("id", userId.ToString()) }),
                 Expires = DateTime.UtcNow.AddDays(7),
-                SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+                SigningCredentials = new SigningCredentials(
+                    new SymmetricSecurityKey(key),
+                    SecurityAlgorithms.HmacSha256Signature)
             };
-            var token = tokenHandler.CreateToken(tokenDescriptor);
-            return tokenHandler.WriteToken(token);
-        }
 
-        private string HashPassword(string password)
-        {
-            using var sha256 = SHA256.Create();
-            var hashedBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
-            return Convert.ToBase64String(hashedBytes);
+            var token = tokenHandler.CreateToken(tokenDescriptor);
+            return tokenHandler.WriteToken(token); // Используем WriteToken вместо ToString()
         }
     }
+
     public class LoginRequest
     {
         public string Username { get; set; }
         public string Password { get; set; }
     }
 
-    [ApiController]
-    [Route("api/[controller]")]
-    public class CoinsController : ControllerBase
+    public class RegisterRequest
     {
-        private readonly ApplicationDbContext _context;
-        private readonly IConfiguration _configuration;
-
-        public CoinsController(ApplicationDbContext context, IConfiguration configuration)
-        {
-            _context = context;
-            _configuration = configuration;
-        }
-
-        [HttpGet("balance")]
-        public IActionResult GetBalance([FromQuery] string token) // Токен передается в параметре запроса
-        {
-            // Проверяем валидность токена и извлекаем userId
-            var userId = ValidateTokenAndGetUserId(token);
-            if (userId == null)
-                return Unauthorized("Invalid token");
-
-            // Находим пользователя в базе данных
-            var user = _context.Users.FirstOrDefault(u => u.Id == userId);
-            if (user == null)
-                return NotFound("User not found");
-
-            return Ok(new { Balance = user.Coins });
-        }
-
-        private int? ValidateTokenAndGetUserId(string token)
-        {
-            var tokenHandler = new JwtSecurityTokenHandler();
-            var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Key"]);
-
-            try
-            {
-                // Валидируем токен
-                var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
-                {
-                    ValidateIssuerSigningKey = true,
-                    IssuerSigningKey = new SymmetricSecurityKey(key),
-                    ValidateIssuer = false,
-                    ValidateAudience = false,
-                    ValidateLifetime = true
-                }, out var validatedToken);
-
-                // Извлекаем userId из токена
-                var userIdClaim = principal.FindFirst("id")?.Value;
-                if (userIdClaim == null)
-                    return null;
-
-                return int.Parse(userIdClaim);
-            }
-            catch
-            {
-                return null; // Токен невалиден
-            }
-        }
+        public string Login { get; set; }
+        public string Password { get; set; }
     }
 
+
     [ApiController]
-    [Route("api/[controller]")]
-    [EnableCors("AllowAll")]
-    public class RewardController : ControllerBase
+    [Route("api/user")]
+    public class UserController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
         private readonly IConfiguration _configuration;
 
-        public RewardController(ApplicationDbContext context, IConfiguration configuration)
+        public UserController(ApplicationDbContext context, IConfiguration configuration)
         {
             _context = context;
             _configuration = configuration;
         }
 
-        [HttpPost("add")]
-        public IActionResult AddCoins([FromBody] AddCoinsRequest request)
+        // Вспомогательный метод для валидации токена
+        private int? ValidateToken(string token)
         {
-            // Проверяем валидность токена и извлекаем userId
-            var userId = ValidateTokenAndGetUserId(request.Token);
-            if (userId == null)
-                return Unauthorized("Invalid token");
-
-            // Находим пользователя в базе данных
-            var user = _context.Users.FirstOrDefault(u => u.Id == userId);
-            if (user == null)
-                return NotFound("User not found");
-
-            // Добавляем монеты пользователю
-            user.Coins += request.Amount;
-            _context.SaveChanges();
-
-            return Ok(user);
-        }
-
-        private int? ValidateTokenAndGetUserId(string token)
-        {
-            var tokenHandler = new JwtSecurityTokenHandler();
-            var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Key"]);
-
             try
             {
-                // Валидируем токен
+                var tokenHandler = new JwtSecurityTokenHandler();
+                var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Key"]);
+
                 var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
                 {
                     ValidateIssuerSigningKey = true,
@@ -210,129 +127,131 @@ namespace APIshka.Controllers
                     ValidateIssuer = false,
                     ValidateAudience = false,
                     ValidateLifetime = true
-                }, out var validatedToken);
+                }, out _);
 
-                // Извлекаем userId из токена
-                var userIdClaim = principal.FindFirst("id")?.Value;
-                if (userIdClaim == null)
-                    return null;
-
-                return int.Parse(userIdClaim);
+                return int.Parse(principal.FindFirst("id").Value);
             }
             catch
             {
-                return null; // Токен невалиден
+                return null;
             }
         }
+
+        #region Монеты
+        [HttpPost("get-coins")]
+        public IActionResult GetCoins([FromBody] TokenRequest request)
+        {
+            var userId = ValidateToken(request.Token);
+            if (userId == null) return Unauthorized();
+
+            var coins = _context.Users
+                .Where(u => u.Id == userId)
+                .Select(u => u.Coins)
+                .FirstOrDefault();
+
+            return Ok(new { coins });
+        }
+
+        [HttpPost("add-coins")]
+        public IActionResult AddCoins([FromBody] AddCoinsRequest request)
+        {
+            var userId = ValidateToken(request.Token);
+            if (userId == null)
+                return Unauthorized("Invalid token");
+
+           var user = _context.Users.FirstOrDefault(u => u.Id == userId);
+            if (user == null)
+                return NotFound("User not found");
+
+            if (request.Amount <= 0)
+                return BadRequest("Amount must be positive");
+
+            user.Coins += request.Amount;
+
+            try
+            {
+                _context.SaveChanges();
+                return Ok(new
+                {
+                    Success = true,
+                    NewBalance = user.Coins
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Error updating balance");
+            }
+        }
+        #endregion
+
+        #region Скины
+        [HttpPost("get-skins")]
+        public IActionResult GetSkins([FromBody] TokenRequest request)
+        {
+            var userId = ValidateToken(request.Token);
+            if (userId == null) return Unauthorized();
+
+            var skins = _context.Skins
+                .Where(s => s.UserId == userId)
+                .Select(s => new { s.Id, s.Name, s.Price })
+                .ToList();
+
+            return Ok(skins);
+        }
+
+        [HttpPost("get-available-skins")]
+        public IActionResult GetAvailableSkins([FromBody] TokenRequest request)
+        {
+            var userId = ValidateToken(request.Token);
+            if (userId == null) return Unauthorized();
+
+            var skins = _context.Skins
+                .Where(s => s.UserId == null)
+                .Select(s => new { s.Id, s.Name, s.Price })
+                .ToList();
+
+            return Ok(skins);
+        }
+
+        [HttpPost("buy-skin")]
+        public IActionResult BuySkin([FromBody] BuySkinRequest request)
+        {
+            var userId = ValidateToken(request.Token);
+            if (userId == null) return Unauthorized();
+
+            var user = _context.Users.Include(u => u.Skins).First(u => u.Id == userId);
+            var skin = _context.Skins.Find(request.SkinId);
+
+            if (skin == null) return NotFound("Skin not found");
+            if (skin.UserId != null) return BadRequest("Skin already purchased");
+            if (user.Coins < skin.Price) return BadRequest("Not enough coins");
+
+            user.Coins -= skin.Price;
+            skin.UserId = (int)userId;
+            user.Skins.Add(skin);
+
+            _context.SaveChanges();
+            return Ok(new { user.Coins });
+        }
+        #endregion
+    }
+
+    // DTO классы
+    public class TokenRequest
+    {
+        public string Token { get; set; }
     }
 
     public class AddCoinsRequest
     {
-        public string Token { get; set; } 
-        public int Amount { get; set; }  
+        public string Token { get; set; }
+        public int Amount { get; set; }
     }
 
-    [ApiController]
-    [Route("api/[controller]")]
-    [EnableCors("AllowAll")]
-    public class SkinsController : ControllerBase
+    public class BuySkinRequest
     {
-        private readonly ApplicationDbContext _context;
-        private readonly IConfiguration _configuration;
-
-        public SkinsController(ApplicationDbContext context, IConfiguration configuration)
-        {
-            _context = context;
-            _configuration = configuration;
-        }
-
-        [HttpGet("available")]
-        public IActionResult GetAvailableSkins([FromQuery] string token) // Токен передается в параметре запроса
-        {
-            // Проверяем валидность токена
-            var userId = ValidateTokenAndGetUserId(token);
-            if (userId == null)
-                return Unauthorized("Invalid token");
-
-            // Получаем список скинов, которые еще не куплены (UserId == null)
-            var skins = _context.Skins.Where(s => s.UserId == null).ToList();
-            return Ok(skins);
-        }
-
-        [HttpPost("purchase")]
-        public IActionResult PurchaseSkin([FromBody] PurchaseRequest request)
-        {
-            // Проверяем валидность токена и извлекаем userId
-            var userId = ValidateTokenAndGetUserId(request.Token);
-            if (userId == null)
-                return Unauthorized("Invalid token");
-
-            // Находим пользователя и скин в базе данных
-            var user = _context.Users.Include(u => u.Skins).FirstOrDefault(u => u.Id == userId);
-            var skin = _context.Skins.FirstOrDefault(s => s.Id == request.SkinId);
-
-            if (user == null || skin == null)
-                return NotFound("User or skin not found");
-
-            // Проверяем, достаточно ли у пользователя монет для покупки
-            if (user.Coins < skin.Price)
-                return BadRequest("Not enough coins");
-
-            // Выполняем покупку
-            user.Coins -= skin.Price; // Списание монет
-            skin.UserId = user.Id;   // Привязка скина к пользователю
-            user.Skins.Add(skin);    // Добавление скина в коллекцию пользователя
-
-            // Создаем запись о транзакции
-            var transaction = new Transaction
-            {
-                UserId = user.Id,
-                SkinId = skin.Id,
-                Date = DateTime.UtcNow
-            };
-            _context.Transactions.Add(transaction);
-
-            // Сохраняем изменения в базе данных
-            _context.SaveChanges();
-
-            return Ok(skin);
-        }
-
-        private int? ValidateTokenAndGetUserId(string token)
-        {
-            var tokenHandler = new JwtSecurityTokenHandler();
-            var key = Encoding.ASCII.GetBytes(_configuration["Jwt:Key"]);
-
-            try
-            {
-                // Валидируем токен
-                var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
-                {
-                    ValidateIssuerSigningKey = true,
-                    IssuerSigningKey = new SymmetricSecurityKey(key),
-                    ValidateIssuer = false,
-                    ValidateAudience = false,
-                    ValidateLifetime = true
-                }, out var validatedToken);
-
-                // Извлекаем userId из токена
-                var userIdClaim = principal.FindFirst("id")?.Value;
-                if (userIdClaim == null)
-                    return null;
-
-                return int.Parse(userIdClaim);
-            }
-            catch
-            {
-                return null; // Токен невалиден
-            }
-        }
+        public string Token { get; set; }
+        public int SkinId { get; set; }
     }
-    public class PurchaseRequest
-    {
-        public string Token { get; set; } // Токен передается в теле запроса
-        public int SkinId { get; set; }   // Идентификатор скина
-    }
-   
 
 }
